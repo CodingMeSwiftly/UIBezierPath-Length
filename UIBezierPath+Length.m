@@ -1,205 +1,196 @@
 #import "UIBezierPath+Length.h"
 
-const NSString *kInfoCurrentPointKey = @"kInfoCurrentPointKey";
-const NSString *kInfoSubpathsKey = @"kInfoSubpathsKey";
-
-struct BezierSubpath {
+typedef struct BezierSubpath {
     CGPoint startPoint;
     CGPoint controlPoint1;
     CGPoint controlPoint2;
     CGPoint endPoint;
     CGFloat length;
     CGPathElementType type;
-};
-typedef struct BezierSubpath BezierSubpath;
+} BezierSubpath;
 
+typedef void(^BezierSubpathEnumerator)(const CGPathElement *element);
 
-id encodeSubpath(BezierSubpath subpath) {
-    return [NSValue valueWithBytes:&subpath objCType:@encode(struct BezierSubpath)];
+static void bezierSubpathFunction(void *info, CGPathElement const *element) {
+	BezierSubpathEnumerator block = (__bridge BezierSubpathEnumerator)info;
+	block(element);
 }
-
-BezierSubpath decodeSubpath(id subpath) {
-    struct BezierSubpath newSubpath;
-    
-    if (strcmp([subpath objCType], @encode(struct BezierSubpath)) == 0) {
-        [subpath getValue:&newSubpath];
-    }
-    
-    return newSubpath;
-}
-
 
 @implementation UIBezierPath (Length)
 
-- (CGFloat)length {
-    return [self calculateLength];
+#pragma mark - Internal
+
+- (void)enumerateSubpaths:(BezierSubpathEnumerator)enumeratorBlock
+{
+	CGPathApply(self.CGPath, (__bridge void *)enumeratorBlock, bezierSubpathFunction);
 }
 
-- (CGFloat)calculateLength {
-    __block CGFloat length = 0;
-    [[self extractSubpaths] enumerateObjectsUsingBlock:^(id obj, NSUInteger idx, BOOL *stop) {
-        BezierSubpath subpath = decodeSubpath(obj);
-        
-        length += subpath.length;
-    }];
-    
-    return length;
+- (NSUInteger)countSubpaths
+{
+	__block NSUInteger count = 0;
+	[self enumerateSubpaths:^(const CGPathElement *element) {
+		if (element->type != kCGPathElementMoveToPoint) {
+			count++;
+		}
+	}];
+	if (count == 0) {
+		return 1;
+	}
+	return count;
 }
 
-- (CGPoint)pointAtPercentOfLength:(CGFloat)percent {
-    NSArray *subpaths = [self extractSubpaths];
-    
-    __block CGFloat length = 0;
-    [subpaths enumerateObjectsUsingBlock:^(id obj, NSUInteger idx, BOOL *stop) {
-        BezierSubpath subpath = decodeSubpath(obj);
-        
-        length += subpath.length;
-    }];
-    
-    CGFloat pointLocationInPath = length * percent;
-    __block CGFloat currentLength = 0;
-    
-    __block BezierSubpath subpathContainingPoint;
-    
-    [subpaths enumerateObjectsUsingBlock:^(id obj, NSUInteger idx, BOOL *stop) {
-        BezierSubpath subpath = decodeSubpath(obj);
-        
-        if (currentLength + subpath.length >= pointLocationInPath) {
-            subpathContainingPoint = subpath;
-            
-            *stop = YES;
-        } else {
-            currentLength += subpath.length;
-        }
-    }];
-    
-    
-    CGFloat lengthInSubpath = pointLocationInPath - currentLength;
-    CGFloat t = lengthInSubpath / subpathContainingPoint.length;
-    
-    return [self pointAtPercent:t ofSubpath:subpathContainingPoint];
-}
-
-- (NSArray *)extractSubpaths {
-    NSMutableArray *subpaths = [NSMutableArray array];
-    
-    NSMutableDictionary *info = [NSMutableDictionary dictionary];
-    [info setObject:[NSValue valueWithCGPoint:CGPointZero] forKey:kInfoCurrentPointKey];
-    [info setObject:subpaths forKey:kInfoSubpathsKey];
-    
-    CGPathRef path = self.CGPath;
-    
-    CGPathApply(path, (__bridge void *)(info), pathApplierFunction);
-    
-    return subpaths;
+- (void)extractSubpaths:(BezierSubpath*)subpathArray
+{
+	__block CGPoint currentPoint = CGPointZero;
+	__block NSUInteger i = 0;
+	[self enumerateSubpaths:^(const CGPathElement *element) {
+		
+		CGPathElementType type = element->type;
+		CGPoint *points = element->points;
+		
+		CGFloat subLength = 0.0f;
+		CGPoint endPoint = CGPointZero;
+		
+		BezierSubpath subpath;
+		subpath.type = type;
+		subpath.startPoint = currentPoint;
+		
+		/*
+		 *  All paths, no matter how complex, are created through a combination of these path elements.
+		 */
+		switch (type) {
+			case kCGPathElementMoveToPoint:
+				
+				endPoint = points[0];
+				
+				break;
+			case kCGPathElementAddLineToPoint:
+				
+				endPoint = points[0];
+				
+				subLength = linearLineLength(currentPoint, endPoint);
+				
+				break;
+			case kCGPathElementAddQuadCurveToPoint:
+				
+				endPoint = points[1];
+				CGPoint controlPoint = points[0];
+				
+				subLength = quadCurveLength(currentPoint, endPoint, controlPoint);
+				
+				subpath.controlPoint1 = controlPoint;
+				
+				break;
+			case kCGPathElementAddCurveToPoint:
+				
+				endPoint = points[2];
+				CGPoint controlPoint1 = points[0];
+				CGPoint controlPoint2 = points[1];
+				
+				subLength = cubicCurveLength(currentPoint, endPoint, controlPoint1, controlPoint2);
+				
+				subpath.controlPoint1 = controlPoint1;
+				subpath.controlPoint2 = controlPoint2;
+				
+				break;
+			case kCGPathElementCloseSubpath:
+			default:
+				break;
+		}
+		
+		subpath.length = subLength;
+		subpath.endPoint = endPoint;
+		
+		if (type != kCGPathElementMoveToPoint) {
+			subpathArray[i] = subpath;
+			i++;
+		}
+		
+		currentPoint = endPoint;
+	}];
+	if (i == 0) {
+		subpathArray[0].length = 0.0f;
+		subpathArray[0].endPoint = currentPoint;
+	}
 }
 
 - (CGPoint)pointAtPercent:(CGFloat)t ofSubpath:(BezierSubpath)subpath {
-    CGPoint p = CGPointZero;
-    
-    switch (subpath.type) {
-        case kCGPathElementAddLineToPoint:
-            p = linearBezierPoint(t, subpath.startPoint, subpath.endPoint);
-            break;
-            
-        case kCGPathElementAddQuadCurveToPoint:
-            p = quadBezierPoint(t, subpath.startPoint, subpath.controlPoint1, subpath.endPoint);
-            break;
-            
-        case kCGPathElementAddCurveToPoint:
-            p = cubicBezierPoint(t, subpath.startPoint, subpath.controlPoint1, subpath.controlPoint2, subpath.endPoint);
-            break;
-            
-        default:
-            break;
-    }
-    
-    return p;
+	
+	CGPoint p = CGPointZero;
+	switch (subpath.type) {
+		case kCGPathElementAddLineToPoint:
+			p = linearBezierPoint(t, subpath.startPoint, subpath.endPoint);
+			break;
+		case kCGPathElementAddQuadCurveToPoint:
+			p = quadBezierPoint(t, subpath.startPoint, subpath.controlPoint1, subpath.endPoint);
+			break;
+		case kCGPathElementAddCurveToPoint:
+			p = cubicBezierPoint(t, subpath.startPoint, subpath.controlPoint1, subpath.controlPoint2, subpath.endPoint);
+			break;
+		default:
+			break;
+	}
+	return p;
 }
 
-void pathApplierFunction(void *info, const CGPathElement *element) {
-    NSMutableDictionary *infoDictionary = (__bridge NSMutableDictionary *)info;
-    
-    CGPoint currentPoint = [[infoDictionary objectForKey:kInfoCurrentPointKey] CGPointValue];
-    NSMutableArray *subpaths = [infoDictionary objectForKey:kInfoSubpathsKey];
-    
-    CGPathElementType type = element->type;
-    CGPoint *points = element->points;
-    
-    CGFloat subLength = 0;
-    CGPoint endPoint = CGPointZero;
-    
-    
-    BezierSubpath subpath;
-    subpath.type = type;
-    subpath.startPoint = currentPoint;
-    
-    
-    /*
-     *  All paths, no matter how complex, are created through a combination of these path elements.
-     */
-    
-    switch (type) {
-        case kCGPathElementMoveToPoint:
-            
-            endPoint = points[0];
-            
-            break;
-            
-        case kCGPathElementCloseSubpath:
-            
-            break;
-            
-        case kCGPathElementAddLineToPoint:
-            
-            endPoint = points[0];
-            
-            subLength = linearLineLength(currentPoint, endPoint);
-            
-            break;
-            
-        case kCGPathElementAddQuadCurveToPoint:
-            
-            endPoint = points[1];
-            CGPoint controlPoint = points[0];
-            
-            subLength = quadCurveLength(currentPoint, endPoint, controlPoint);
-            
-            subpath.controlPoint1 = controlPoint;
-            
-            break;
-            
-        case kCGPathElementAddCurveToPoint:
-            
-            endPoint = points[2];
-            CGPoint controlPoint1 = points[0];
-            CGPoint controlPoint2 = points[1];
-            
-            subLength = cubicCurveLength(currentPoint, endPoint, controlPoint1, controlPoint2);
-            
-            subpath.controlPoint1 = controlPoint1;
-            subpath.controlPoint2 = controlPoint2;
-            
-            break;
-    }
-    
-    
-    subpath.length = subLength;
-    subpath.endPoint = endPoint;
-    
-    if (type != kCGPathElementMoveToPoint) {
-        [subpaths addObject:encodeSubpath(subpath)];
-    }
-    
-    [infoDictionary setObject:[NSValue valueWithCGPoint:endPoint] forKey:kInfoCurrentPointKey];
+#pragma mark - Public API
+
+- (CGFloat)length {
+	
+	NSUInteger subpathCount = [self countSubpaths];
+	BezierSubpath subpaths[subpathCount];
+	[self extractSubpaths:subpaths];
+	
+	CGFloat length = 0.0f;
+	for (NSUInteger i = 0; i < subpathCount; i++) {
+		length += subpaths[i].length;
+	}
+	return length;
 }
 
+- (CGPoint)pointAtPercentOfLength:(CGFloat)percent {
+	
+	if (percent < 0.0f) {
+		percent = 0.0f;
+	} else if (percent > 1.0f) {
+		percent = 1.0f;
+	}
+	
+	NSUInteger subpathCount = [self countSubpaths];
+	BezierSubpath subpaths[subpathCount];
+	[self extractSubpaths:subpaths];
+    
+	CGFloat length = 0.0f;
+	for (NSUInteger i = 0; i < subpathCount; i++) {
+		length += subpaths[i].length;
+	}
+	
+    CGFloat pointLocationInPath = length * percent;
+    CGFloat currentLength = 0;
+    BezierSubpath subpathContainingPoint;
+	for (NSUInteger i = 0; i < subpathCount; i++) {
+		if (currentLength + subpaths[i].length >= pointLocationInPath) {
+			subpathContainingPoint = subpaths[i];
+			break;
+		} else {
+			currentLength += subpaths[i].length;
+		}
+	}
+	
+    CGFloat lengthInSubpath = pointLocationInPath - currentLength;
+	if (subpathContainingPoint.length == 0) {
+		return subpathContainingPoint.endPoint;
+	} else {
+		CGFloat t = lengthInSubpath / subpathContainingPoint.length;
+		return [self pointAtPercent:t ofSubpath:subpathContainingPoint];
+	}
+}
 
+#pragma mark - Math helpers
 
 CGFloat linearLineLength(CGPoint fromPoint, CGPoint toPoint) {
     return sqrtf(powf(toPoint.x - fromPoint.x, 2) + powf(toPoint.y - fromPoint.y, 2));
 }
-
 
 CGFloat quadCurveLength(CGPoint fromPoint, CGPoint toPoint, CGPoint controlPoint) {
     int iterations = 100;
@@ -231,8 +222,6 @@ CGFloat cubicCurveLength(CGPoint fromPoint, CGPoint toPoint, CGPoint controlPoin
         
         length += linearLineLength(p, pp);
     }
-    
-    
     return length;
 }
 
