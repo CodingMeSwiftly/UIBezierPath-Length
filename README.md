@@ -2,6 +2,10 @@
 A category on UIBezierPath that calculates the length and a point at a given length of the path.
 
 
+This library is also available for Swift:
+https://github.com/ImJCabus/UIBezierPath-Superpowers
+
+
 The MIT License (MIT)
 
 Copyright (c) 2015 Maximilian Kraus
